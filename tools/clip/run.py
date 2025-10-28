@@ -20,7 +20,7 @@ from openpilot.common.prefix import OpenpilotPrefix
 from openpilot.common.utils import managed_proc
 from openpilot.tools.lib.route import Route
 from openpilot.tools.lib.logreader import LogReader
-from selfdrive.ui.ui import UI
+from openpilot.selfdrive.ui.ui import UI
 
 DEFAULT_OUTPUT = 'output.mp4'
 DEMO_START = 90
@@ -232,7 +232,6 @@ def clip(
 
   with OpenpilotPrefix(prefix, shared_download_cache=True):
     populate_car_params(lr)
-    env = os.environ.copy()
 
     with managed_proc(replay_cmd) as replay_proc:
       procs = [replay_proc]
@@ -270,7 +269,7 @@ def clip(
         except BrokenPipeError:
           logger.warning("ffmpeg stdin broken pipe, recording may have finished early.")
         except Exception as e:
-          logger.error(f"Error during recording loop: {e}")
+          logger.exception(f"Error during recording loop: {e}")
           raise
 
         logger.info("Closing ffmpeg stdin...")
