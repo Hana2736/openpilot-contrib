@@ -4,6 +4,7 @@ import logging
 import platform
 import shutil
 import sys
+import os
 import time
 from argparse import ArgumentParser, ArgumentTypeError
 from collections.abc import Sequence
@@ -19,7 +20,7 @@ from openpilot.common.prefix import OpenpilotPrefix
 from openpilot.common.utils import managed_proc
 from openpilot.tools.lib.route import Route
 from openpilot.tools.lib.logreader import LogReader
-from openpilot.selfdrive.ui.ui import UI
+from openpilot.selfdrive.ui import UI
 
 DEFAULT_OUTPUT = 'output.mp4'
 DEMO_START = 90
@@ -232,20 +233,25 @@ def clip(
   with OpenpilotPrefix(prefix, shared_download_cache=True):
     populate_car_params(lr)
 
-    with managed_proc(replay_cmd) as replay_proc:
+    env = os.environ.copy()
+    with managed_proc(replay_cmd, env) as replay_proc:
       procs = [replay_proc]
 
       sm = SubMaster(UI.SUBSCRIPTIONS)
       ui = UI()
 
+
       logger.info('waiting for replay to begin (loading segments, may take a while)...')
-      while not sm.all_alive_and_valid(UI.SUBSCRIPTIONS):
+      while not sm.all_alive(UI.SUBSCRIPTIONS):
         sm.update(100)
         time.sleep(0.01)
         check_for_failure(procs)
 
       with Popen(ffmpeg_cmd, stdin=PIPE) as ffmpeg_proc:
         procs.append(ffmpeg_proc)
+
+        if ffmpeg_proc.stdin is None:
+          raise ChildProcessError("ffmpeg stdin is None")
 
         logger.debug(f'letting UI warm up ({SECONDS_TO_WARM}s)...')
         for _ in range(SECONDS_TO_WARM * FRAMERATE):
