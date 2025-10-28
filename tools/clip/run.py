@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import logging
-import os
 import platform
 import shutil
 import sys
@@ -269,7 +268,7 @@ def clip(
         except BrokenPipeError:
           logger.warning("ffmpeg stdin broken pipe, recording may have finished early.")
         except Exception as e:
-          logger.exception(f"Error during recording loop: {e}")
+          logger.exception(f"Error during recording loop.")
           raise
 
         logger.info("Closing ffmpeg stdin...")
