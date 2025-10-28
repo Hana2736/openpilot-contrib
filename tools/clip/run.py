@@ -10,7 +10,7 @@ from argparse import ArgumentParser, ArgumentTypeError
 from collections.abc import Sequence
 from pathlib import Path
 from random import randint
-from subprocess import Popen
+from subprocess import Popen, PIPE
 from typing import Literal
 
 from cereal.messaging import SubMaster
@@ -20,20 +20,19 @@ from openpilot.common.prefix import OpenpilotPrefix
 from openpilot.common.utils import managed_proc
 from openpilot.tools.lib.route import Route
 from openpilot.tools.lib.logreader import LogReader
+from selfdrive.ui.ui import UI
 
 DEFAULT_OUTPUT = 'output.mp4'
 DEMO_START = 90
 DEMO_END = 105
 DEMO_ROUTE = 'a2a0ccea32023010/2023-07-27--13-01-19'
 FRAMERATE = 20
-PIXEL_DEPTH = '24'
 RESOLUTION = '2160x1080'
 SECONDS_TO_WARM = 2
 PROC_WAIT_SECONDS = 30*10
 
 OPENPILOT_FONT = str(Path(BASEDIR, 'selfdrive/assets/fonts/Inter-Regular.ttf').resolve())
 REPLAY = str(Path(BASEDIR, 'tools/replay/replay').resolve())
-UI = str(Path(BASEDIR, 'selfdrive/ui/ui').resolve())
 
 logger = logging.getLogger('clip.py')
 
@@ -141,10 +140,10 @@ def populate_car_params(lr: LogReader):
 def validate_env(parser: ArgumentParser):
   if platform.system() not in ['Linux']:
     parser.exit(1, f'clip.py: error: {platform.system()} is not a supported operating system\n')
-  for proc in ['Xvfb', 'ffmpeg']:
+  for proc in ['ffmpeg']:
     if shutil.which(proc) is None:
       parser.exit(1, f'clip.py: error: missing {proc} command, is it installed?\n')
-  for proc in [REPLAY, UI]:
+  for proc in [REPLAY]:
     if shutil.which(proc) is None:
       parser.exit(1, f'clip.py: error: missing {proc} command, did you build openpilot yet?\n')
 
@@ -167,15 +166,6 @@ def validate_title(title: str):
   return title
 
 
-def wait_for_frames(procs: list[Popen]):
-  sm = SubMaster(['uiDebug'])
-  no_frames_drawn = True
-  while no_frames_drawn:
-    sm.update()
-    no_frames_drawn = sm['uiDebug'].drawTimeMillis == 0.
-    check_for_failure(procs)
-
-
 def clip(
   data_dir: str | None,
   quality: Literal['low', 'high'],
@@ -194,9 +184,6 @@ def clip(
   begin_at = max(start - SECONDS_TO_WARM, 0)
   duration = end - start
   bit_rate_kbps = int(round(target_mb * 8 * 1024 * 1024 / duration / 1000))
-
-  # TODO: evaluate creating fn that inspects /tmp/.X11-unix and creates unused display to avoid possibility of collision
-  display = f':{randint(99, 999)}'
 
   box_style = 'box=1:boxcolor=black@0.33:boxborderw=7'
   meta_text = get_meta_text(lr, route)
@@ -217,12 +204,11 @@ def clip(
 
   ffmpeg_cmd = [
     'ffmpeg', '-y',
-    '-video_size', RESOLUTION,
-    '-framerate', str(FRAMERATE),
-    '-f', 'x11grab',
-    '-rtbufsize', '100M',
-    '-draw_mouse', '0',
-    '-i', display,
+    '-f', 'rawvideo',
+    '-pix_fmt', 'rgb24',
+    '-s', RESOLUTION,
+    '-r', str(FRAMERATE),
+    '-i', '-', # Get video from stdin
     '-c:v', 'libx264',
     '-maxrate', f'{bit_rate_kbps}k',
     '-bufsize', f'{bit_rate_kbps*2}k',
@@ -244,25 +230,53 @@ def clip(
     replay_cmd.append('--qcam')
   replay_cmd.append(route.name.canonical_name)
 
-  ui_cmd = [UI, '-platform', 'xcb']
-  xvfb_cmd = ['Xvfb', display, '-terminate', '-screen', '0', f'{RESOLUTION}x{PIXEL_DEPTH}']
-
   with OpenpilotPrefix(prefix, shared_download_cache=True):
     populate_car_params(lr)
     env = os.environ.copy()
-    env['DISPLAY'] = display
 
-    with managed_proc(xvfb_cmd, env) as xvfb_proc, managed_proc(ui_cmd, env) as ui_proc, managed_proc(replay_cmd, env) as replay_proc:
-      procs = [xvfb_proc, ui_proc, replay_proc]
+    with managed_proc(replay_cmd) as replay_proc:
+      procs = [replay_proc]
+
+      sm = SubMaster(UI.SUBSCRIPTIONS)
+      ui = UI()
+
       logger.info('waiting for replay to begin (loading segments, may take a while)...')
-      wait_for_frames(procs)
-      logger.debug(f'letting UI warm up ({SECONDS_TO_WARM}s)...')
-      time.sleep(SECONDS_TO_WARM)
-      check_for_failure(procs)
-      with managed_proc(ffmpeg_cmd, env) as ffmpeg_proc:
+      while not sm.all_alive_and_valid(UI.SUBSCRIPTIONS):
+        sm.update(100)
+        time.sleep(0.01)
+        check_for_failure(procs)
+
+      with Popen(ffmpeg_cmd, stdin=PIPE) as ffmpeg_proc:
         procs.append(ffmpeg_proc)
+
+        logger.debug(f'letting UI warm up ({SECONDS_TO_WARM}s)...')
+        for _ in range(SECONDS_TO_WARM * FRAMERATE):
+          sm.update(100)
+          ui.update(sm)
+          check_for_failure(procs)
+
         logger.info(f'recording in progress ({duration}s)...')
+        try:
+          for i in range(duration * FRAMERATE):
+            sm.update(100)
+            frame = ui.update(sm)
+
+            if frame is None:
+              logger.error(f"UI returned None frame at step {i}")
+              break
+
+            ffmpeg_proc.stdin.write(frame.tobytes())
+            check_for_failure(procs)
+        except BrokenPipeError:
+          logger.warning("ffmpeg stdin broken pipe, recording may have finished early.")
+        except Exception as e:
+          logger.error(f"Error during recording loop: {e}")
+          raise
+
+        logger.info("Closing ffmpeg stdin...")
+        ffmpeg_proc.stdin.close()
         ffmpeg_proc.wait(duration + PROC_WAIT_SECONDS)
+
         check_for_failure(procs)
         logger.info(f'recording complete: {Path(out).resolve()}')
 
