@@ -267,8 +267,8 @@ def clip(
             check_for_failure(procs)
         except BrokenPipeError:
           logger.warning("ffmpeg stdin broken pipe, recording may have finished early.")
-        except Exception as e:
-          logger.exception(f"Error during recording loop.")
+        except Exception:
+          logger.exception("Error during recording loop.")
           raise
 
         logger.info("Closing ffmpeg stdin...")
